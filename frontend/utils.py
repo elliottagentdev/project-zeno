@@ -15,6 +15,70 @@ API_BASE_URL = os.environ.get(
     os.environ.get("LOCAL_API_BASE_URL", "http://localhost:8000"),
 )
 
+# Basemap tile providers. The first entry is the default.
+# Explicit URLs used instead of folium built-in names because
+# folium's internal URL registry has proven unreliable.
+BASEMAP_CONFIGS = [
+    {
+        "tiles": (
+            "https://{s}.basemaps.cartocdn.com"
+            "/light_all/{z}/{x}/{y}{r}.png"
+        ),
+        "attr": (
+            '&copy; <a href="https://www.openstreetmap.org'
+            '/copyright">OpenStreetMap</a> contributors '
+            '&copy; <a href="https://carto.com/">CARTO</a>'
+        ),
+        "name": "Light",
+    },
+    {
+        "tiles": (
+            "https://{s}.basemaps.cartocdn.com"
+            "/dark_all/{z}/{x}/{y}{r}.png"
+        ),
+        "attr": (
+            '&copy; <a href="https://www.openstreetmap.org'
+            '/copyright">OpenStreetMap</a> contributors '
+            '&copy; <a href="https://carto.com/">CARTO</a>'
+        ),
+        "name": "Dark",
+    },
+    {
+        # ESRI uses {z}/{y}/{x} order (not {z}/{x}/{y})
+        "tiles": (
+            "https://server.arcgisonline.com/ArcGIS/rest"
+            "/services/World_Imagery/MapServer"
+            "/tile/{z}/{y}/{x}"
+        ),
+        "attr": (
+            "Tiles &copy; Esri &mdash; Source: Esri, "
+            "i-cubed, USDA, USGS, AEX, GeoEye, "
+            "Getmapping, Aerogrid, IGN, IGP, UPR-EGP, "
+            "and the GIS User Community"
+        ),
+        "name": "Satellite",
+    },
+]
+
+
+def _create_base_map(center, zoom_start):
+    """Create a folium Map with Light, Dark, and Satellite basemaps."""
+    m = folium.Map(
+        location=center,
+        zoom_start=zoom_start,
+        tiles=None,
+    )
+    for i, config in enumerate(BASEMAP_CONFIGS):
+        folium.raster_layers.TileLayer(
+            tiles=config["tiles"],
+            attr=config["attr"],
+            name=config["name"],
+            overlay=False,
+            control=True,
+            show=(i == 0),
+        ).add_to(m)
+    return m
+
 
 # TODO: move rendering logic to a separate module so
 # that the threads can import
@@ -102,7 +166,7 @@ def render_aoi_map(aoi_data, subregion_data=None):
                 center = [0, 0]
 
         # Create folium map
-        m = folium.Map(location=center, zoom_start=5, tiles="OpenStreetMap")
+        m = _create_base_map(center=center, zoom_start=5)
 
         # Add AOI to map
         if geojson_data:
@@ -146,6 +210,9 @@ def render_aoi_map(aoi_data, subregion_data=None):
             except Exception as e:
                 st.warning(f"Could not render subregions: {str(e)}")
 
+        # LayerControl must be added after all layers
+        folium.LayerControl().add_to(m)
+
         # Display map in streamlit
         st.subheader("📍 Area of Interest")
         folium_static(
@@ -172,31 +239,92 @@ def render_dataset_map(dataset_data, aoi_data=None):
             st.warning("No tile_url found in dataset")
             return
 
-        # Calculate center from AOI if available, otherwise use default
-        center = [0, 0]  # Default center
-        zoom_start = 2  # Default zoom for global view
+        # Resolve AOI geometry for map centering and overlay
+        geometry = None
+        if aoi_data and isinstance(aoi_data, dict):
+            # Check session state cache first for previously resolved geometry
+            cached_geom = st.session_state.get("last_aoi_geometry")
+            cached_src_id = st.session_state.get(
+                "last_aoi_geometry_src_id"
+            )
 
-        if aoi_data and isinstance(aoi_data, dict) and "geometry" in aoi_data:
+            if "geometry" in aoi_data:
+                geometry = aoi_data["geometry"]
+            elif (
+                cached_geom
+                and cached_src_id == aoi_data.get("src_id")
+            ):
+                geometry = cached_geom
+            elif aoi_data.get("src_id") and aoi_data.get("source"):
+                try:
+                    client = ZenoClient(
+                        base_url=API_BASE_URL,
+                        token=st.session_state.token,
+                    )
+                    geom_response = client.fetch_geometry(
+                        source=aoi_data["source"],
+                        src_id=aoi_data["src_id"],
+                    )
+                    geometry = geom_response.get("geometry")
+                    # Cache for subsequent renders
+                    if geometry:
+                        st.session_state[
+                            "last_aoi_geometry"
+                        ] = geometry
+                        st.session_state[
+                            "last_aoi_geometry_src_id"
+                        ] = aoi_data["src_id"]
+                except Exception:
+                    geometry = None
+
+        # Calculate center and zoom from geometry bounds
+        center = [0, 0]
+        zoom_start = 2
+
+        if geometry and isinstance(geometry, dict):
             try:
-                # Convert GeoJSON to shapely geometry
-                geom = shape(aoi_data["geometry"])
-
-                # Get bounding box and calculate center
+                geom = shape(geometry)
                 minx, miny, maxx, maxy = geom.bounds
-                center = [(miny + maxy) / 2, (minx + maxx) / 2]
-                zoom_start = 5  # Closer zoom when AOI is available
+                # Validate bounds are finite (empty GeometryCollection
+                # produces inf values)
+                if all(
+                    abs(v) != float("inf")
+                    for v in (minx, miny, maxx, maxy)
+                ):
+                    center = [
+                        (miny + maxy) / 2,
+                        (minx + maxx) / 2,
+                    ]
+                    zoom_start = 5
             except (ValueError, AttributeError, TypeError):
-                # If any error occurs during conversion, use default center
                 center = [0, 0]
                 zoom_start = 2
 
         # Create folium map
-        m2 = folium.Map(
-            location=center, zoom_start=zoom_start, tiles="OpenStreetMap"
+        m2 = _create_base_map(
+            center=center, zoom_start=zoom_start
         )
 
+        # Fit map to geometry bounds for dynamic zoom
+        if geometry and isinstance(geometry, dict):
+            try:
+                geom = shape(geometry)
+                minx, miny, maxx, maxy = geom.bounds
+                if all(
+                    abs(v) != float("inf")
+                    for v in (minx, miny, maxx, maxy)
+                ):
+                    m2.fit_bounds(
+                        [[miny, minx], [maxy, maxx]]
+                    )
+            except (ValueError, AttributeError, TypeError):
+                pass  # Keep default center/zoom
+
         # Add dataset tile layer
-        dataset_name = dataset_data.get("data_layer", "Dataset Layer")
+        dataset_name = dataset_data.get(
+            "dataset_name",
+            dataset_data.get("data_layer", "Dataset Layer"),
+        )
         folium.raster_layers.TileLayer(
             tiles=tile_url,
             attr="Dataset Tiles",
@@ -205,23 +333,26 @@ def render_dataset_map(dataset_data, aoi_data=None):
             control=True,
         ).add_to(m2)
 
-        # Add AOI overlay if provided
-        if aoi_data and isinstance(aoi_data, dict) and "geometry" in aoi_data:
+        # Add AOI overlay using resolved geometry
+        if geometry and isinstance(geometry, dict):
             try:
-                geojson_data = aoi_data["geometry"]
                 folium.GeoJson(
-                    geojson_data,
+                    geometry,
                     style_function=lambda feature: {
                         "fillColor": "blue",
                         "color": "blue",
                         "weight": 2,
                         "fillOpacity": 0.1,
                     },
-                    popup=folium.Popup("Area of Interest", parse_html=True),
+                    popup=folium.Popup(
+                        "Area of Interest", parse_html=True
+                    ),
                     tooltip="AOI",
                 ).add_to(m2)
             except Exception as e:
-                st.warning(f"Could not render AOI overlay: {str(e)}")
+                st.warning(
+                    f"Could not render AOI overlay: {str(e)}"
+                )
 
         # Add layer control
         folium.LayerControl().add_to(m2)
@@ -685,6 +816,7 @@ def render_stream(stream):
     aoi_data = None
     if "aoi" in update:
         aoi_data = update["aoi"]
+        st.session_state["last_aoi_data"] = aoi_data
         subregion_data = (
             update.get("subregion_aois")
             if update.get("subregion") is not None
@@ -696,8 +828,9 @@ def render_stream(stream):
     if "dataset" in update:
         dataset_data = update["dataset"]
         aoi_data = (
-            update.get("aoi") or aoi_data
-        )  # Include AOI as overlay if available
+            update.get("aoi")
+            or st.session_state.get("last_aoi_data")
+        )
         render_dataset_map(dataset_data, aoi_data)
 
     # Render charts if this is a tool node with charts_data
@@ -776,21 +909,22 @@ def display_sidebar_selections():
     }
 
     # Dataset Selection Dictionary
+    # NOTE: dataset_id values must match analytics_datasets.yml (TCL=4, DIST-ALERT=0)
     DATASET_OPTIONS = {
         "None": None,
         "Tree Cover Loss": {
             "dataset": {
-                "dataset_id": 0,
+                "dataset_id": 4,
                 "source": "GFW",
                 "dataset_name": "Tree cover loss",
-                "tile_url": "https://tiles.globalforestwatch.org/umd_tree_cover_loss/latest/dynamic/{z}/{x}/{y}.png?start_year=2001&end_year=2024&tree_cover_density_threshold=25&render_type=true_color",
+                "tile_url": "https://tiles.globalforestwatch.org/umd_tree_cover_loss/latest/dynamic/{z}/{x}/{y}.png?start_year=2001&end_year=2024&tree_cover_density_threshold=30&render_type=true_color",
                 "context_layer": "Primary forest",
                 "threshold": "30",
             }
         },
         "DIST_ALERT": {
             "dataset": {
-                "dataset_id": 14,
+                "dataset_id": 0,
                 "source": "GFW",
                 "dataset_name": "DIST-ALERT",
                 "tile_url": "https://tiles.globalforestwatch.org/umd_glad_dist_alerts/latest/dynamic/{z}/{x}/{y}.png?render_type=true_color",

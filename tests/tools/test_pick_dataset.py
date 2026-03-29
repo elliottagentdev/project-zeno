@@ -489,3 +489,79 @@ async def test_tcl_by_driver_always_gets_driver_context_layer():
 
     result_layer = command.update.get("dataset", {}).get("context_layer")
     assert result_layer == "driver"
+
+
+# --- TCL year clamping tests ---
+
+
+async def _invoke_tcl_with_dates(start_date: str, end_date: str) -> str:
+    """Helper: invoke pick_dataset with a mocked TCL selection, return tile_url."""
+    import pandas as pd
+
+    fake_selection = _make_fake_selection(4, None)  # TCL = dataset_id 4
+    candidate_df = pd.DataFrame([d for d in DATASETS if d["dataset_id"] == 4])
+    tool_call_id = str(uuid.uuid4())
+
+    with (
+        patch(
+            "src.agent.tools.pick_dataset.rag_candidate_datasets",
+            new_callable=AsyncMock,
+            return_value=candidate_df,
+        ),
+        patch(
+            "src.agent.tools.pick_dataset.select_best_dataset",
+            new_callable=AsyncMock,
+            return_value=fake_selection,
+        ),
+    ):
+        tool_call = {
+            "type": "tool_call",
+            "name": "pick_dataset",
+            "id": tool_call_id,
+            "args": {
+                "query": "forest loss",
+                "start_date": start_date,
+                "end_date": end_date,
+                "tool_call_id": tool_call_id,
+            },
+        }
+        command = await pick_dataset.ainvoke(tool_call)
+
+    return command.update.get("dataset", {}).get("tile_url", "")
+
+
+async def test_tcl_normal_years_unchanged():
+    """Normal year range passes through without clamping."""
+    tile_url = await _invoke_tcl_with_dates("2020-01-01", "2023-12-31")
+    assert "start_year=2020" in tile_url
+    assert "end_year=2023" in tile_url
+
+
+async def test_tcl_start_year_capped_at_max_start():
+    """start_year=2024 is clamped to 2023 (GFW tile service constraint)."""
+    tile_url = await _invoke_tcl_with_dates("2024-01-01", "2024-12-31")
+    assert "start_year=2023" in tile_url
+    assert "end_year=2024" in tile_url
+
+
+async def test_tcl_end_year_capped_at_max():
+    """end_year=2030 is clamped to 2024."""
+    tile_url = await _invoke_tcl_with_dates("2020-01-01", "2030-12-31")
+    assert "start_year=2020" in tile_url
+    assert "end_year=2024" in tile_url
+
+
+async def test_tcl_start_year_lower_bound():
+    """start_year=1990 is clamped to 2001."""
+    tile_url = await _invoke_tcl_with_dates("1990-01-01", "2020-12-31")
+    assert "start_year=2001" in tile_url
+    assert "end_year=2020" in tile_url
+
+
+async def test_tcl_inverted_years_corrected():
+    """When start > end after clamping, start is set to end."""
+    # start=2024 -> clamped to 2023, end=2002 -> stays 2002
+    # 2023 > 2002 so start set to 2002
+    tile_url = await _invoke_tcl_with_dates("2024-01-01", "2002-12-31")
+    assert "start_year=2002" in tile_url
+    assert "end_year=2002" in tile_url
