@@ -303,8 +303,10 @@ async def pick_dataset(
             )
     elif selection_result.dataset_id == TREE_COVER_LOSS_ID:
         if end_date.year in range(2001, 2025):
+            # GFW tile service only accepts start_year <= 2023 even though analytics data goes to 2024
+            tile_start_year = min(start_date.year, 2023)
             selection_result.tile_url += (
-                f"&start_year={start_date.year}&end_year={end_date.year}"
+                f"&start_year={tile_start_year}&end_year={end_date.year}"
             )
         else:
             selection_result.tile_url += "&start_year=2001&end_year=2024"
