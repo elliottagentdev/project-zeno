@@ -17,6 +17,9 @@ from src.agent.tools.data_handlers.analytics_handler import (
     DIST_ALERT_ID,
     GRASSLANDS_ID,
     LAND_COVER_CHANGE_ID,
+    TCL_TILE_MAX_START_YEAR,
+    TCL_TILE_MAX_YEAR,
+    TCL_TILE_MIN_YEAR,
     TREE_COVER_LOSS_BY_DRIVER_ID,
     TREE_COVER_LOSS_ID,
 )
@@ -318,12 +321,26 @@ async def pick_dataset(
                 year="2022"
             )
     elif selection_result.dataset_id == TREE_COVER_LOSS_ID:
-        if end_date.year in range(2001, 2025):
-            selection_result.tile_url += (
-                f"&start_year={start_date.year}&end_year={end_date.year}"
-            )
-        else:
-            selection_result.tile_url += "&start_year=2001&end_year=2024"
+        start_year = max(
+            min(start_date.year, TCL_TILE_MAX_START_YEAR),
+            TCL_TILE_MIN_YEAR,
+        )
+        end_year = max(
+            min(end_date.year, TCL_TILE_MAX_YEAR),
+            TCL_TILE_MIN_YEAR,
+        )
+        if start_year > end_year:
+            start_year = end_year
+        logger.info(
+            "TCL tile year params",
+            start_year=start_year,
+            end_year=end_year,
+            original_start=start_date.year,
+            original_end=end_date.year,
+        )
+        selection_result.tile_url += (
+            f"&start_year={start_year}&end_year={end_year}"
+        )
 
     return Command(
         update={

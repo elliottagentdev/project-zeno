@@ -126,6 +126,12 @@ TREE_COVER_LOSS_BY_DRIVER_ID = [
     for ds in DATASETS
     if ds["dataset_name"] == "Tree cover loss by dominant driver"
 ][0]
+
+# Tile service year bounds for Tree Cover Loss
+# NOTE: Update annually when GFW adds new year data
+TCL_TILE_MIN_YEAR = 2001
+TCL_TILE_MAX_YEAR = 2024
+TCL_TILE_MAX_START_YEAR = 2023  # GFW tile service constraint
 SLUC_EMISSION_FACTORS_ID = [
     ds["dataset_id"]
     for ds in DATASETS
