@@ -17,6 +17,7 @@ from src.agent.state import AgentState
 from src.agent.tools import (
     generate_insights,
     get_capabilities,
+    gfw_pro_analysis,
     pick_aoi,
     pick_dataset,
     pull_data,
@@ -44,10 +45,13 @@ TOOLS:
 - pull_data: Pulls data for the selected AOI and dataset in the specified date range.
 - generate_insights: Analyzes raw data to generate a single chart insight that answers the user's question, along with 2-3 follow-up suggestions for further exploration.
 - get_capabilities: Get information about your capabilities, available datasets, supported areas and about you. ONLY use when users ask what you can do, what data is available, what's possible or about you.
+- gfw_pro_analysis: Run GFW Pro deforestation and disturbance alert analysis for the current AOI. Returns SBTN/JRC forest area, tree cover loss 2021-2024, indigenous lands area, and disturbance alerts as a downloadable CSV. Requires AOI selected first.
 
 WORKFLOW:
 1. Use pick_aoi, pick_dataset, and pull_data to get the data in the specified date range.
 2. Use generate_insights to analyze the data and create a single chart insight. After pulling data, always create new insights.
+
+If user asks for 'GFW Pro analysis', 'deforestation metrics', or 'GFW Pro analytical results': call gfw_pro_analysis (requires AOI selected first via pick_aoi).
 
 When you see UI action messages:
 1. Acknowledge the user's selection: "I see you've selected [item name]"
@@ -116,6 +120,7 @@ tools = [
     pick_dataset,
     pull_data,
     generate_insights,
+    gfw_pro_analysis,
 ]
 
 load_dotenv()
