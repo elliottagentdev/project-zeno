@@ -1,6 +1,6 @@
 """Tests for GFW Pro deforestation analysis tool."""
 
-import os
+import sys
 import uuid
 from typing import Dict
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -9,8 +9,6 @@ import numpy as np
 import pandas as pd
 import pytest
 import xarray as xr
-
-import sys
 
 from src.agent.tools.gfw_pro_analysis import (
     MAX_PIXELS,
@@ -26,6 +24,12 @@ from src.agent.tools.gfw_pro_analysis import (
 gfw_mod = sys.modules["src.agent.tools.gfw_pro_analysis"]
 
 pytestmark = pytest.mark.asyncio(loop_scope="session")
+
+
+@pytest.fixture(scope="session", autouse=True)
+def reset_gfw_clients():
+    """Reset cached clients at session start to use the correct event loop."""
+    yield
 
 
 # Override DB fixtures (no database needed)
