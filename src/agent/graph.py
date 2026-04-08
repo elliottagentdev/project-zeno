@@ -21,6 +21,7 @@ from src.agent.state import AgentState
 from src.agent.tools import (
     generate_insights,
     get_capabilities,
+    gfw_pro_analysis,
     pick_aoi,
     pick_dataset,
     pull_data,
@@ -120,6 +121,7 @@ tools = [
     pick_dataset,
     pull_data,
     generate_insights,
+    gfw_pro_analysis,
 ]
 
 load_dotenv()

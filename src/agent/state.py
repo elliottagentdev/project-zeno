@@ -1,5 +1,5 @@
 import operator
-from typing import Annotated, Sequence
+from typing import Annotated, Optional, Sequence
 
 from langchain_core.messages import BaseMessage
 from langgraph.graph import add_messages
@@ -43,3 +43,6 @@ class AgentState(TypedDict):
     insights: list
     charts_data: list
     codeact_parts: list[CodeActPart]
+
+    # gfw-pro tool
+    gfw_pro_csv: Optional[str]

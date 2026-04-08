@@ -49,6 +49,10 @@ dependencies = [
     "bcrypt==4.2.1",
     "click==8.1.8",
     "google-genai==1.68.0",
+    "xarray>=2024.1.0",
+    "zarr>=3.0.0",
+    "rioxarray>=0.17.0",
+    "dask[array,dataframe]>=2024.1.0",
 ]
 
 [dependency-groups]

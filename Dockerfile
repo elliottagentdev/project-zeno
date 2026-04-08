@@ -11,6 +11,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libpq-dev \
     ca-certificates \
     libexpat1 \
+    libgdal-dev \
     && rm -rf /var/lib/apt/lists/*
 
 ADD https://astral.sh/uv/0.8.12/install.sh /uv-installer.sh

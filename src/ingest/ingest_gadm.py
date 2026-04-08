@@ -245,9 +245,10 @@ def ingest_to_postgis(
 
 def main():
     """Main function to download, extract, and ingest GADM data."""
+    data_dir = Path(os.environ.get("GADM_DATA_DIR", "data"))
     # Download and extract GADM data
-    zip_path = download(GADM_ZIP_URL, "data/gadm_410-levels.zip")
-    gpkg_path = extract_gpkg(Path(zip_path), Path("data"))
+    zip_path = download(GADM_ZIP_URL, data_dir / "gadm_410-levels.zip")
+    gpkg_path = extract_gpkg(Path(zip_path), data_dir)
 
     # Ingest to PostGIS in chunks
     print("Ingesting GADM data to PostGIS in chunks...")
