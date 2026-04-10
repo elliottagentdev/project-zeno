@@ -11,9 +11,9 @@ import pytest
 import xarray as xr
 
 from src.agent.tools.gfw_pro_analysis import (
-    MAX_PIXELS,
+    _bbox_slice,
+    _build_mask,
     _sanitize_csv_field,
-    clip_ds_to_geojson,
     dataframes_to_csv,
     gfw_pro_analysis,
     get_datasets,
@@ -79,7 +79,7 @@ SAMPLE_GEOMETRY_COLLECTION = {
 }
 
 EXPECTED_COLUMNS = [
-    "name", "total_area", "sbtn_area", "sbtn_loss_area",
+    "name", "total area", "sbtn_area", "sbtn_loss_area",
     "jrc_area", "jrc_loss_area", "indig_area", "alert_area",
     "sbtn_alert_area", "jrc_alert_area",
 ]
@@ -89,15 +89,15 @@ def _make_synthetic_dataset(
     var_names, x_range=(100.0, 101.0), y_range=(0.0, 1.0),
     n=10, fill_value=1.0,
 ):
-    """Create a synthetic xr.Dataset with given variable names."""
+    """Create a synthetic xr.Dataset with given variable names and band dim."""
     x = np.linspace(x_range[0], x_range[1], n)
     y = np.linspace(y_range[0], y_range[1], n)
     data_vars = {}
     for vname in var_names:
-        data_vars[vname] = (["y", "x"], np.full((n, n), fill_value))
+        data_vars[vname] = (["band", "y", "x"], np.full((1, n, n), fill_value))
     ds = xr.Dataset(
         data_vars,
-        coords={"x": x, "y": y},
+        coords={"x": x, "y": y, "band": [1]},
     )
     ds = ds.rio.set_spatial_dims(x_dim="x", y_dim="y")
     ds = ds.rio.write_crs("EPSG:4326")
@@ -105,22 +105,23 @@ def _make_synthetic_dataset(
 
 
 def _make_mock_datasets():
-    """Create 4 mock datasets matching expected variable names."""
+    """Create 4 mock datasets matching actual zarr variable names."""
     sbtn_ds = _make_synthetic_dataset(
-        ["area", "sbtn", "indig"],
+        ["band_data"],
         fill_value=1.0,
     )
-    # sbtn > 0, indig > 0 for all pixels
-    jrc_ds = _make_synthetic_dataset(["jrc"], fill_value=1.0)
+    jrc_ds = _make_synthetic_dataset(["band_data"], fill_value=1.0)
     loss_ds = _make_synthetic_dataset(
-        ["mergedLoss"], fill_value=2022.0,
+        ["pixel_area", "sbtn_loss_area", "jrc_loss_area", "indig_area"],
+        fill_value=1.0,
     )
     intdist_ds = _make_synthetic_dataset(
-        ["date", "conf"],
+        ["alert_date", "confidence"],
     )
-    # Set date to a recent date and conf >= 2
-    intdist_ds["date"] = intdist_ds["date"] * 20250601
-    intdist_ds["conf"] = intdist_ds["conf"] * 3
+    # Set alert_date to days-since-epoch well above the default start
+    intdist_ds["alert_date"] = intdist_ds["alert_date"] * 4000
+    # confidence >= 3 triggers alert detection
+    intdist_ds["confidence"] = intdist_ds["confidence"] * 3
 
     return {
         "sbtn": sbtn_ds,
@@ -192,26 +193,27 @@ def test_get_datasets_s3_fallback(monkeypatch):
         gfw_mod._datasets_cache = original_cache
 
 
-def test_clip_ds_to_geojson_basic():
-    """Clip reduces dataset to polygon extent."""
+def test_bbox_slice_reduces_extent():
+    """Bbox slice reduces dataset to polygon extent."""
     ds = _make_synthetic_dataset(
         ["data"], x_range=(99.0, 102.0), y_range=(-1.0, 2.0),
         n=30, fill_value=42.0,
     )
-    clipped = clip_ds_to_geojson(ds, SAMPLE_POLYGON)
-    # Should have data, smaller than original
-    assert clipped["data"].size > 0
-    assert clipped["data"].size < ds["data"].size
+    sliced = _bbox_slice(ds, SAMPLE_POLYGON)
+    assert sliced["data"].size > 0
+    assert sliced["data"].size < ds["data"].size
 
 
-def test_clip_ds_to_geojson_geometry_collection():
-    """Clip with GeometryCollection works."""
+def test_build_mask_geometry_collection():
+    """Polygon mask works with GeometryCollection."""
     ds = _make_synthetic_dataset(
         ["data"], x_range=(99.0, 102.0), y_range=(-1.0, 2.0),
         n=30, fill_value=42.0,
     )
-    clipped = clip_ds_to_geojson(ds, SAMPLE_GEOMETRY_COLLECTION)
-    assert clipped["data"].size > 0
+    sliced = _bbox_slice(ds, SAMPLE_GEOMETRY_COLLECTION)
+    mask = _build_mask(sliced, SAMPLE_GEOMETRY_COLLECTION)
+    assert mask.shape == (sliced.sizes["y"], sliced.sizes["x"])
+    assert mask.any()  # some pixels inside polygon
 
 
 def test_run_analysis_returns_correct_columns():
@@ -231,34 +233,6 @@ def test_run_analysis_returns_correct_columns():
         val = df[col].iloc[0]
         assert val == round(val, 4)
 
-
-def test_run_analysis_too_large_aoi():
-    """run_analysis raises ValueError for oversized AOI."""
-    # Create dataset where total pixel count exceeds MAX_PIXELS
-    mock_ds = _make_mock_datasets()
-
-    def fake_clip(ds, geom):
-        # Return a dataset with huge shape
-        big = _make_synthetic_dataset(
-            list(ds.data_vars), n=10001, fill_value=1.0,
-        )
-        return big
-
-    with (
-        patch(
-            "src.agent.tools.gfw_pro_analysis.get_datasets",
-            return_value=mock_ds,
-        ),
-        patch(
-            "src.agent.tools.gfw_pro_analysis.clip_ds_to_geojson",
-            side_effect=fake_clip,
-        ),
-        patch(
-            "src.agent.tools.gfw_pro_analysis.MAX_PIXELS", 1000,
-        ),
-    ):
-        with pytest.raises(ValueError, match="too large"):
-            run_analysis(SAMPLE_POLYGON, "huge_aoi")
 
 
 def test_dataframes_to_csv_format():

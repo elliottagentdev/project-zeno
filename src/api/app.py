@@ -1349,6 +1349,29 @@ async def get_thread_state(
         )
 
 
+@app.get("/api/threads/{thread_id}/gfw-pro-csv")
+async def get_gfw_pro_csv(
+    thread_id: str,
+):
+
+    zeno_async = await fetch_zeno()
+    config = {"configurable": {"thread_id": thread_id}}
+    state = await zeno_async.aget_state(config=config)
+    csv_string = state.values.get("gfw_pro_csv")
+    if not csv_string:
+        raise HTTPException(
+            status_code=404, detail="No GFW Pro CSV available for this thread"
+        )
+
+    return Response(
+        content=csv_string,
+        media_type="text/csv",
+        headers={
+            "Content-Disposition": f'attachment; filename="gfw_pro_analysis_{thread_id}.csv"'
+        },
+    )
+
+
 @app.post("/api/custom_area_name", response_model=CustomAreaNameResponse)
 async def custom_area_name(
     request: CustomAreaNameRequest, user: UserModel = Depends(require_auth)

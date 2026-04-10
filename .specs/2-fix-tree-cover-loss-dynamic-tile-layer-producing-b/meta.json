@@ -1,0 +1,10 @@
+{
+  "repo": "project-zeno",
+  "issue_number": 2,
+  "issue_title": "Fix Tree Cover Loss dynamic tile layer producing blank map (no pink pixels)",
+  "slug": "2-fix-tree-cover-loss-dynamic-tile-layer-producing-b",
+  "created_at": "2026-03-29T19:30:18Z",
+  "session_backend": "tmux",
+  "session_name": "project-zeno_specs_2-fix-tree-cover-loss-dynamic-tile-layer-producing-b_claude",
+  "mode": "full"
+}

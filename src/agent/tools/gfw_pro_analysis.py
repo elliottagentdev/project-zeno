@@ -4,6 +4,7 @@ import asyncio
 import os
 import re
 import threading
+import time
 from datetime import datetime
 from typing import Annotated, Dict, Optional
 
@@ -102,54 +103,63 @@ def get_datasets() -> dict[str, xr.Dataset]:
         return _datasets_cache
 
 
-def clip_ds_to_geojson(
+def _bbox_slice(
     ds: xr.Dataset, geojson_geom: dict
 ) -> xr.Dataset:
-    """Clip dataset to GeoJSON geometry via bbox + rioxarray."""
+    """Lazy bbox slice of dataset — no data is loaded."""
     geom = shape(geojson_geom)
     minx, miny, maxx, maxy = geom.bounds
 
-    # Determine spatial dimension names
     if "lon" in ds.dims:
         x_dim, y_dim = "lon", "lat"
     else:
         x_dim, y_dim = "x", "y"
 
-    # Detect y-axis direction (ascending vs descending)
     y_vals = ds[y_dim].values
     if y_vals[0] < y_vals[-1]:
-        # Ascending y
         y_slice = slice(miny, maxy)
     else:
-        # Descending y
         y_slice = slice(maxy, miny)
 
-    # Bbox slice (fast, reduces data volume)
-    ds_bbox = ds.sel(
-        {x_dim: slice(minx, maxx), y_dim: y_slice}
-    )
+    return ds.sel({x_dim: slice(minx, maxx), y_dim: y_slice})
 
-    # Set spatial dims for rioxarray
-    ds_bbox = ds_bbox.rio.set_spatial_dims(
-        x_dim=x_dim, y_dim=y_dim
-    )
 
-    # Set CRS if not already set
-    if not ds_bbox.rio.crs:
-        ds_bbox = ds_bbox.rio.write_crs("EPSG:4326")
+def _build_mask(
+    ds: xr.Dataset, geojson_geom: dict
+) -> np.ndarray:
+    """Build a boolean polygon mask for the bbox-sliced grid.
 
-    # Decompose GeometryCollection into individual geometries
-    if geojson_geom.get("type") == "GeometryCollection":
-        clip_geoms = [
-            mapping(g) for g in geom.geoms
-        ]
+    Uses rasterio.features.geometry_mask which operates on
+    coordinates only (no pixel data loaded).
+    """
+    from rasterio.features import geometry_mask
+    from rasterio.transform import from_bounds
+
+    geom = shape(geojson_geom)
+    if "lon" in ds.dims:
+        x_dim, y_dim = "lon", "lat"
     else:
-        clip_geoms = [geojson_geom]
+        x_dim, y_dim = "x", "y"
 
-    clipped = ds_bbox.rio.clip(
-        clip_geoms, crs="EPSG:4326", drop=True
+    xs = ds[x_dim].values
+    ys = ds[y_dim].values
+    width, height = len(xs), len(ys)
+
+    x_min, x_max = float(xs.min()), float(xs.max())
+    y_min, y_max = float(ys.min()), float(ys.max())
+    transform = from_bounds(x_min, y_min, x_max, y_max, width, height)
+
+    if geojson_geom.get("type") == "GeometryCollection":
+        geoms = list(geom.geoms)
+    else:
+        geoms = [geom]
+
+    # geometry_mask returns True where pixels are OUTSIDE the geometry
+    inverted = geometry_mask(
+        geoms, out_shape=(height, width), transform=transform,
+        invert=True,
     )
-    return clipped
+    return inverted  # True = inside polygon
 
 
 def _sanitize_csv_field(value: str) -> str:
@@ -170,7 +180,14 @@ def run_analysis(
     jrc_loss_area, indig_area, alert_area, sbtn_alert_area,
     jrc_alert_area (all areas in hectares).
     """
+    t_start = time.perf_counter()
     datasets = get_datasets()
+    t_datasets = time.perf_counter()
+    logger.info(
+        "Analysis started",
+        aoi=name,
+        datasets_load_s=round(t_datasets - t_start, 2),
+    )
 
     # Convert alert start date to days since 2014-12-31
     alert_start_str = os.environ.get(
@@ -180,72 +197,133 @@ def run_analysis(
         datetime.strptime(alert_start_str, "%Y-%m-%d") - ALERT_EPOCH
     ).days
 
-    # Clip all datasets to AOI bounding box + polygon mask
-    # squeeze("band") removes the single band dimension, matching
-    # the reference query3.py clip_ds_to_geojson behaviour.
-    loss = clip_ds_to_geojson(
-        datasets["mergedLoss"], geojson_geometry
-    ).squeeze("band").astype(np.float64)
-    sbtn_area = clip_ds_to_geojson(
-        datasets["sbtn"], geojson_geometry
-    ).squeeze("band").astype(np.float64)
-    jrc_area = clip_ds_to_geojson(
-        datasets["jrc"], geojson_geometry
-    ).squeeze("band").astype(np.float64)
-    intdist = clip_ds_to_geojson(
-        datasets["intdist"], geojson_geometry
-    ).squeeze("band")
+    TILE = 4096  # spatial tile size — peak mem ~4 tiles × 8 vars × 4B ≈ 500 MB
 
-    # Extract pre-computed area variables from mergedLoss zarr
-    pixel_area = loss["pixel_area"]
-    sbtn_loss_area = loss["sbtn_loss_area"]
-    jrc_loss_area = loss["jrc_loss_area"]
-    indig_area = loss["indig_area"]
+    # --- Phase 1: Lazy bbox slice (no data loaded) ---
+    t0 = time.perf_counter()
+    loss_raw = _bbox_slice(datasets["mergedLoss"], geojson_geometry).squeeze("band")
+    sbtn_raw = _bbox_slice(datasets["sbtn"], geojson_geometry).squeeze("band")
+    jrc_raw = _bbox_slice(datasets["jrc"], geojson_geometry).squeeze("band")
+    intdist_raw = _bbox_slice(datasets["intdist"], geojson_geometry).squeeze("band")
+    t_bbox = time.perf_counter() - t0
 
-    # Disturbance alerts: high (conf>=3) or highest (conf>=4)
-    # since alert_start_date.
-    # confidence encoding: 2=nominal, 3=high, 4=highest
-    alert_area = (
-        (intdist["alert_date"] >= alert_start_days)
-        * (intdist["confidence"] >= 3)
-        * pixel_area
+    ny, nx = loss_raw.sizes["y"], loss_raw.sizes["x"]
+    total_pixels = nx * ny
+    geom = shape(geojson_geometry)
+    bbox = geom.bounds
+
+    logger.info(
+        "Bbox slice complete",
+        aoi=name,
+        bbox=[round(c, 3) for c in bbox],
+        grid_shape={"x": nx, "y": ny},
+        total_pixels=total_pixels,
+        bbox_slice_s=round(t_bbox, 2),
     )
 
-    # Alert area intersected with SBTN / JRC forests.
-    # Use > 0 (not != 0) so that NaN pixels evaluate as False.
-    sbtn_alert_area = alert_area * (sbtn_area["band_data"] > 0)
-    jrc_alert_area = alert_area * (jrc_area["band_data"] > 0)
+    # --- Phase 2: Build polygon mask (coords only, ~few MB) ---
+    t0 = time.perf_counter()
+    mask_full = _build_mask(loss_raw, geojson_geometry)
+    t_mask = time.perf_counter() - t0
+    mask_pct = round(float(mask_full.sum()) / mask_full.size * 100, 1)
+    logger.info(
+        "Polygon mask built",
+        aoi=name,
+        mask_shape=mask_full.shape,
+        mask_true_pct=mask_pct,
+        mask_build_s=round(t_mask, 2),
+    )
 
-    combined = xr.Dataset({
-        "total area": pixel_area,
-        "sbtn_area": sbtn_area["band_data"],
-        "sbtn_loss_area": sbtn_loss_area,
-        "jrc_area": jrc_area["band_data"],
-        "jrc_loss_area": jrc_loss_area,
-        "indig_area": indig_area,
-        "alert_area": alert_area,
-        "sbtn_alert_area": sbtn_alert_area,
-        "jrc_alert_area": jrc_alert_area,
-    })
-
-    summed = combined.sum(dim=("x", "y"))
-    summed_df = summed.to_dask_dataframe()
-    drop_cols = [
-        c for c in ["spatial_ref", "band"]
-        if c in summed_df.columns
+    # --- Phase 3: Tiled summation (constant memory) ---
+    # Accumulate sums across spatial tiles. Each tile loads a small
+    # window from each zarr, applies the mask, computes partial sums,
+    # then discards the tile. Peak memory = 1 tile × all vars.
+    METRIC_KEYS = [
+        "total area", "sbtn_area", "sbtn_loss_area", "jrc_area",
+        "jrc_loss_area", "indig_area", "alert_area",
+        "sbtn_alert_area", "jrc_alert_area",
     ]
-    results_dask = summed_df.drop(columns=drop_cols)
+    accum = {k: 0.0 for k in METRIC_KEYS}
 
-    with warnings.catch_warnings():
-        warnings.filterwarnings(
-            "ignore",
-            message="invalid value encountered in cast",
-            category=RuntimeWarning,
-        )
-        results_df: pd.DataFrame = (
-            results_dask.compute() / 10000
-        ).round(4)
+    n_tiles_y = (ny + TILE - 1) // TILE
+    n_tiles_x = (nx + TILE - 1) // TILE
+    n_tiles = n_tiles_y * n_tiles_x
+    tiles_done = 0
 
+    t_compute_start = time.perf_counter()
+
+    for iy in range(0, ny, TILE):
+        for ix in range(0, nx, TILE):
+            yend = min(iy + TILE, ny)
+            xend = min(ix + TILE, nx)
+
+            mask_tile = mask_full[iy:yend, ix:xend]
+            if not mask_tile.any():
+                tiles_done += 1
+                continue  # tile fully outside polygon
+
+            sel = {"y": slice(iy, yend), "x": slice(ix, xend)}
+
+            with warnings.catch_warnings():
+                warnings.filterwarnings(
+                    "ignore",
+                    message="invalid value encountered in cast",
+                    category=RuntimeWarning,
+                )
+                # Load tile data from zarr (this is the only I/O)
+                tile_sel = loss_raw.isel(**sel)
+                pa = tile_sel["pixel_area"].values.astype(np.float32) * mask_tile
+                sl = tile_sel["sbtn_loss_area"].values.astype(np.float32) * mask_tile
+                jl = tile_sel["jrc_loss_area"].values.astype(np.float32) * mask_tile
+                ia = tile_sel["indig_area"].values.astype(np.float32) * mask_tile
+
+                sb = sbtn_raw.isel(**sel)["band_data"].values.astype(np.float32) * mask_tile
+                jb = jrc_raw.isel(**sel)["band_data"].values.astype(np.float32) * mask_tile
+
+                intdist_tile = intdist_raw.isel(**sel)
+                alert_date = intdist_tile["alert_date"].values
+                confidence = intdist_tile["confidence"].values
+
+            m = mask_tile.astype(np.float32)
+
+            # Alert computation
+            aa = ((alert_date >= alert_start_days) * (confidence >= 3)).astype(np.float32) * pa
+            saa = aa * (sb > 0)
+            jaa = aa * (jb > 0)
+
+            accum["total area"] += float(np.nansum(pa))
+            accum["sbtn_area"] += float(np.nansum(sb))
+            accum["sbtn_loss_area"] += float(np.nansum(sl))
+            accum["jrc_area"] += float(np.nansum(jb))
+            accum["jrc_loss_area"] += float(np.nansum(jl))
+            accum["indig_area"] += float(np.nansum(ia))
+            accum["alert_area"] += float(np.nansum(aa))
+            accum["sbtn_alert_area"] += float(np.nansum(saa))
+            accum["jrc_alert_area"] += float(np.nansum(jaa))
+
+            tiles_done += 1
+            if tiles_done % 5 == 0 or tiles_done == n_tiles:
+                logger.debug(
+                    "Tile progress",
+                    aoi=name,
+                    tiles=f"{tiles_done}/{n_tiles}",
+                )
+
+    t_compute = time.perf_counter() - t_compute_start
+
+    # Convert accumulated sums to hectares and round
+    row = {k: round(v / 10000, 4) for k, v in accum.items()}
+
+    t_total = time.perf_counter() - t_start
+    logger.info(
+        "Analysis complete",
+        aoi=name,
+        compute_s=round(t_compute, 2),
+        total_s=round(t_total, 2),
+        results=row,
+    )
+
+    results_df = pd.DataFrame([row])
     results_df.insert(
         loc=0, column="name", value=_sanitize_csv_field(name)
     )
@@ -372,7 +450,11 @@ async def gfw_pro_analysis(
     # 5. Build CSV
     csv_string = dataframes_to_csv(dfs)
 
-    # 6. Summary message
+    # 6. Summary message — include actual results so the agent
+    #    can present them inline (frontend CSV download not yet built).
+    combined_df = pd.concat(dfs, ignore_index=True)
+    results_table = combined_df.to_string(index=False)
+
     parts = [
         f"GFW Pro analysis complete for "
         f"{len(dfs)} AOI(s).",
@@ -382,18 +464,27 @@ async def gfw_pro_analysis(
             f"Failed for: {', '.join(failed_aois)}."
         )
     parts.append(
-        "Metrics: total area, SBTN forest, SBTN loss, "
-        "JRC forest, JRC loss, indigenous lands, "
-        "alert area, SBTN alerts, JRC alerts."
+        "Metrics (all values in hectares):\n"
+        f"{results_table}"
     )
-    parts.append("Results available as downloadable CSV.")
+    parts.append(
+        "\nColumn key: total area = jurisdiction area, "
+        "sbtn_area = SBTN natural forest, "
+        "sbtn_loss_area = SBTN forest loss (2021-2024), "
+        "jrc_area = JRC forest cover, "
+        "jrc_loss_area = JRC forest loss, "
+        "indig_area = indigenous/community lands, "
+        "alert_area = integrated disturbance alerts, "
+        "sbtn_alert_area = alerts in SBTN forests, "
+        "jrc_alert_area = alerts in JRC forests."
+    )
 
     return Command(
         update={
             "gfw_pro_csv": csv_string,
             "messages": [
                 ToolMessage(
-                    content=" ".join(parts),
+                    content="\n".join(parts),
                     tool_call_id=tool_call_id,
                 )
             ],

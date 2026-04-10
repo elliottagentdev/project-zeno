@@ -1,0 +1,10 @@
+{
+  "repo": "project-zeno",
+  "issue_number": 1,
+  "issue_title": "Fix Light basemap tile layer failing to render on map initialization",
+  "slug": "1-fix-light-basemap-tile-layer-failing-to-render-on",
+  "created_at": "2026-03-29T19:23:45Z",
+  "session_backend": "tmux",
+  "session_name": "project-zeno_specs_1-fix-light-basemap-tile-layer-failing-to-render-on_claude",
+  "mode": "full"
+}
