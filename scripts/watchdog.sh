@@ -86,6 +86,13 @@ while true; do
         fi
         log "Still waiting... (${i}/6)"
       done
+
+      # Pre-warm Next.js route compilation so first user request is fast
+      NEXT_WARMUP="/home/agentdev/Projects/factory/project-zeno-next/scripts/warmup.sh"
+      if [[ -x "${NEXT_WARMUP}" ]]; then
+        log "Running Next.js route warmup..."
+        bash "${NEXT_WARMUP}" --wait 5 &
+      fi
     fi
   fi
 
