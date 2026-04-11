@@ -167,6 +167,9 @@ def _sanitize_csv_field(value: str) -> str:
     return re.sub(r'^[=+\-@]+', '', value)
 
 
+MAX_PIXELS = 5_000_000_000  # 5B pixels; beyond this, memory usage is unsafe
+
+
 def run_analysis(
     geojson_geometry: dict, name: str
 ) -> pd.DataFrame:
@@ -179,6 +182,10 @@ def run_analysis(
     name, total area, sbtn_area, sbtn_loss_area, jrc_area,
     jrc_loss_area, indig_area, alert_area, sbtn_alert_area,
     jrc_alert_area (all areas in hectares).
+
+    Raises:
+        ValueError: If the bounding-box pixel count exceeds MAX_PIXELS
+            (5,000,000,000). Reduce the AOI or split into sub-regions.
     """
     t_start = time.perf_counter()
     datasets = get_datasets()
@@ -209,6 +216,12 @@ def run_analysis(
 
     ny, nx = loss_raw.sizes["y"], loss_raw.sizes["x"]
     total_pixels = nx * ny
+    if total_pixels > MAX_PIXELS:
+        raise ValueError(
+            f"AOI bbox is too large: {total_pixels:,} pixels exceeds "
+            f"MAX_PIXELS limit of {MAX_PIXELS:,}. "
+            "Reduce the AOI extent or split into sub-regions."
+        )
     geom = shape(geojson_geometry)
     bbox = geom.bounds
 

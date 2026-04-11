@@ -524,3 +524,30 @@ async def test_tool_analysis_failure_per_aoi():
     msg = command.update["messages"][0].content
     assert "FailAOI" in msg
     assert "1 AOI(s)" in msg
+
+
+def test_run_analysis_raises_on_large_aoi():
+    """run_analysis raises ValueError when bbox exceeds MAX_PIXELS."""
+    large_loss = _make_synthetic_dataset(
+        ["pixel_area", "sbtn_loss_area", "jrc_loss_area", "indig_area"],
+        fill_value=1.0,
+    )
+    # Patch sizes to simulate a Bolivia-scale AOI (nx * ny > 5B)
+    large_loss = MagicMock()
+    large_loss.sizes = {"y": 100_000, "x": 60_000}  # 6B pixels
+
+    mock_ds = _make_mock_datasets()
+    mock_ds["mergedLoss"] = large_loss
+
+    with (
+        patch(
+            "src.agent.tools.gfw_pro_analysis.get_datasets",
+            return_value=mock_ds,
+        ),
+        patch(
+            "src.agent.tools.gfw_pro_analysis._bbox_slice",
+            return_value=large_loss,
+        ),
+    ):
+        with pytest.raises(ValueError, match="MAX_PIXELS"):
+            run_analysis(SAMPLE_POLYGON, "large_aoi")
