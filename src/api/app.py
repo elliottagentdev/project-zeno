@@ -103,6 +103,19 @@ async def lifespan(app: FastAPI):
     # (Required due to asyncpg vs psycopg driver compatibility)
     await get_checkpointer_pool()
 
+    # Warm up the TCP/TLS connection to the RW auth endpoint so the first
+    # real auth request doesn't pay the ~800ms-1.7s handshake cost.
+    # The request will 401 (dummy token) — that is expected and fine.
+    try:
+        async with httpx.AsyncClient() as warmup_client:
+            await warmup_client.get(
+                "https://api.resourcewatch.org/auth/user/me",
+                headers={"Authorization": "Bearer warmup"},
+                timeout=10.0,
+            )
+    except Exception as exc:
+        logger.warning("RW auth endpoint warmup failed (non-fatal)", error=str(exc))
+
     yield
 
     # Cleanup on shutdown
