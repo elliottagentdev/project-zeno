@@ -147,7 +147,20 @@ def _build_mask(
 
     x_min, x_max = float(xs.min()), float(xs.max())
     y_min, y_max = float(ys.min()), float(ys.max())
-    transform = from_bounds(x_min, y_min, x_max, y_max, width, height)
+
+    # xs/ys are pixel centres; from_bounds expects pixel-edge bounds.
+    # Expand by half a pixel in each direction so the transform aligns
+    # with the actual grid — matching the behaviour of rioxarray.clip.
+    res_x = float(xs[1] - xs[0]) if width > 1 else 1.0
+    res_y = abs(float(ys[1] - ys[0])) if height > 1 else 1.0
+    transform = from_bounds(
+        x_min - res_x / 2,
+        y_min - res_y / 2,
+        x_max + res_x / 2,
+        y_max + res_y / 2,
+        width,
+        height,
+    )
 
     if geojson_geom.get("type") == "GeometryCollection":
         geoms = list(geom.geoms)
