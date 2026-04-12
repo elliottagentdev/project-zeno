@@ -133,7 +133,6 @@ def _build_mask(
     coordinates only (no pixel data loaded).
     """
     from rasterio.features import geometry_mask
-    from rasterio.transform import from_bounds
 
     geom = shape(geojson_geom)
     if "lon" in ds.dims:
@@ -145,22 +144,28 @@ def _build_mask(
     ys = ds[y_dim].values
     width, height = len(xs), len(ys)
 
-    x_min, x_max = float(xs.min()), float(xs.max())
-    y_min, y_max = float(ys.min()), float(ys.max())
-
-    # xs/ys are pixel centres; from_bounds expects pixel-edge bounds.
-    # Expand by half a pixel in each direction so the transform aligns
-    # with the actual grid — matching the behaviour of rioxarray.clip.
-    res_x = float(xs[1] - xs[0]) if width > 1 else 1.0
-    res_y = abs(float(ys[1] - ys[0])) if height > 1 else 1.0
-    transform = from_bounds(
-        x_min - res_x / 2,
-        y_min - res_y / 2,
-        x_max + res_x / 2,
-        y_max + res_y / 2,
-        width,
-        height,
-    )
+    # Use rioxarray's own transform — identical to what _clip_xarray passes to
+    # geometry_mask internally, guaranteeing pixel-identical mask construction
+    # at any AOI scale (including sub-hectare polygons ≈ single pixels).
+    try:
+        transform = ds.rio.transform(recalc=True)
+    except Exception:
+        # Degenerate bbox (1 pixel wide or tall): rioxarray cannot derive
+        # resolution from a single coordinate; fall back to adjacent-pixel
+        # formula. Safe: zarr grid is uniform so xs[1]-xs[0] == resolution.
+        from rasterio.transform import from_bounds
+        x_min, x_max = float(xs.min()), float(xs.max())
+        y_min, y_max = float(ys.min()), float(ys.max())
+        res_x = float(xs[1] - xs[0]) if width > 1 else float(abs(ys[1] - ys[0]))
+        res_y = abs(float(ys[1] - ys[0])) if height > 1 else res_x
+        transform = from_bounds(
+            x_min - res_x / 2,
+            y_min - res_y / 2,
+            x_max + res_x / 2,
+            y_max + res_y / 2,
+            width,
+            height,
+        )
 
     if geojson_geom.get("type") == "GeometryCollection":
         geoms = list(geom.geoms)
